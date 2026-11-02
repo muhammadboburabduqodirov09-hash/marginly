@@ -151,8 +151,16 @@ function AuthGate({ onAuthenticated }) {
         }),
       });
       if (!/\bjson\b/i.test(res.headers.get("content-type") || "")) {
+        const responseText = await res.text();
+        const responseHint = responseText
+          .replace(/<[^>]*>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 180);
         throw new Error(
-          `The authentication endpoint returned a non-JSON response (HTTP ${res.status}). Check that the API server is running.`,
+          `Authentication failed with HTTP ${res.status}: ${
+            responseHint || "the API returned a non-JSON response"
+          } Check the API terminal for the server-side error.`,
         );
       }
       const result = await res.json();

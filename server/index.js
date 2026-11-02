@@ -3,12 +3,12 @@ import express from 'express';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { User, Product, Order, Fee, ReturnLog, AIRecommendation, Connection } from './models.js';
+import { User, Product, Order, Fee, ReturnLog, AIRecommendation, Connection, TelegramPollerLease } from './models.js';
 import { aggregate, predictBaseline, deepseek, seal, sha256, accountSchema } from './services.js';
 
 const app = express();
@@ -44,17 +44,27 @@ app.post('/api/advisor',auth,restricted,wrap(async(req,res)=>{const q=z.string()
 app.post('/api/connections',auth,restricted,wrap(async(req,res)=>{const v=z.object({marketplace:z.enum(['Uzum Market','Amazon','Shopify','Etsy','Wildberries','Ozon']),accessToken:z.string().min(8).max(4096)}).safeParse(req.body);if(!v.success)return res.status(400).json({error:'Invalid connection'});const encryptedToken=seal(v.data.accessToken);await Connection.findOneAndUpdate({owner:req.user._id,marketplace:v.data.marketplace},{$set:{encryptedToken,status:'Saved; not synced'}},{upsert:true,new:true});res.json({marketplace:v.data.marketplace,status:'Saved; not synced',note:'Credentials encrypted at rest. Marketplace sync requires a provider-specific authorized adapter.'});}));
 app.delete('/api/connections/:marketplace',auth,wrap(async(req,res)=>{await Connection.deleteOne({owner:req.user._id,marketplace:req.params.marketplace});res.json({ok:true});}));
 app.post('/api/telegram/link',auth,restricted,wrap(async(req,res)=>{const code=randomBytes(8).toString('hex');req.user.telegramLinkCodeHash=sha256(code);req.user.telegramLinkExpires=new Date(Date.now()+10*60000);await req.user.save();res.json({code,expiresMinutes:10,note:'Send /start CODE to your bot privately.'});}));
-async function telegramApi(method,payload={},timeoutMs=10000){if(!process.env.TELEGRAM_BOT_TOKEN)throw new Error('TELEGRAM_BOT_TOKEN is not configured');const response=await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',signal:AbortSignal.timeout(timeoutMs),headers:{'content-type':'application/json'},body:JSON.stringify(payload)});const result=await response.json();if(!response.ok||!result.ok)throw new Error(result.description||`Telegram ${method} failed (${response.status})`);return result.result;}
+async function telegramApi(method,payload={},timeoutMs=10000){if(!process.env.TELEGRAM_BOT_TOKEN)throw new Error('TELEGRAM_BOT_TOKEN is not configured');const response=await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',signal:AbortSignal.timeout(timeoutMs),headers:{'content-type':'application/json'},body:JSON.stringify(payload)});const result=await response.json();if(!response.ok||!result.ok){const error=new Error(result.description||`Telegram ${method} failed (${response.status})`);error.telegramStatus=result.error_code||response.status;throw error;}return result.result;}
 async function telegramSend(chatId,text){await telegramApi('sendMessage',{chat_id:chatId,text});}
 async function handleTelegramUpdate(update){const msg=update.message;const match=typeof msg?.text==='string'&&msg.text.match(/^\/start(?:@\w+)?\s+([a-f0-9]{16})$/);if(!match||!msg?.chat?.id)return;const user=await User.findOne({telegramLinkCodeHash:sha256(match[1]),telegramLinkExpires:{$gt:new Date()}}).select('+telegramChatId +telegramLinkCodeHash');if(user){user.telegramChatId=String(msg.chat.id);user.telegramLinkCodeHash=undefined;user.telegramLinkExpires=undefined;await user.save();await telegramSend(msg.chat.id,'Marginly alerts linked successfully.');}}
-async function telegramPollingLoop(){if(!process.env.TELEGRAM_BOT_TOKEN){console.warn('Telegram polling disabled: TELEGRAM_BOT_TOKEN is not configured');return;}let offset,webhookRemoved=false;while(true){try{if(!webhookRemoved){await telegramApi('deleteWebhook',{drop_pending_updates:false});webhookRemoved=true;}const updates=await telegramApi('getUpdates',{...(offset===undefined?{}:{offset}),timeout:30,allowed_updates:['message']},40000);for(const update of updates){await handleTelegramUpdate(update);offset=update.update_id+1;}}catch(e){console.error('Telegram polling:',e.message);await new Promise(resolve=>setTimeout(resolve,5000));}}}
+const telegramPollerId=randomUUID();
+const telegramLeaseDurationMs=90000;
+let telegramPollingActive=false;
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function acquireTelegramLease(){try{const lease=await TelegramPollerLease.findOneAndUpdate({key:'main',$or:[{owner:telegramPollerId},{expiresAt:{$lte:new Date()}}]},{$set:{owner:telegramPollerId,expiresAt:new Date(Date.now()+telegramLeaseDurationMs)}},{upsert:true,new:true});return lease?.owner===telegramPollerId;}catch(e){if(e.code===11000)return false;throw e;}}
+async function releaseTelegramLease(){await TelegramPollerLease.updateOne({key:'main',owner:telegramPollerId},{$set:{expiresAt:new Date(0)}});}
+async function telegramPollingLoop(){if(!process.env.TELEGRAM_BOT_TOKEN){console.warn('Telegram polling disabled: TELEGRAM_BOT_TOKEN is not configured');return;}let offset,webhookRemoved=false;while(true){try{if(!(await acquireTelegramLease())){telegramPollingActive=false;await sleep(10000);continue;}if(!telegramPollingActive){telegramPollingActive=true;alertCycle().catch(console.error);}if(!webhookRemoved){await telegramApi('deleteWebhook',{drop_pending_updates:false});webhookRemoved=true;}const updates=await telegramApi('getUpdates',{...(offset===undefined?{}:{offset}),timeout:30,allowed_updates:['message']},40000);for(const update of updates){await handleTelegramUpdate(update);offset=update.update_id+1;}}catch(e){telegramPollingActive=false;if(e.telegramStatus===409){console.error('Telegram polling conflict: another process is using this bot token. Retrying in 60 seconds.');try{await releaseTelegramLease();}catch(releaseError){console.error('Could not release Telegram polling lease:',releaseError.message);}webhookRemoved=false;await sleep(60000);}else{console.error('Telegram polling:',e.message);await sleep(5000);}}}}
 async function alertCycle(){const users=await User.find({telegramChatId:{$exists:true,$ne:null}}).select('+telegramChatId');for(const u of users){const products=await Product.find({owner:u._id});for(const p of products){if(p.lastAlertAt&&Date.now()-p.lastAlertAt.getTime()<24*3600000)continue;const orders=await Order.find({owner:u._id,productId:p._id,date:{$gte:new Date(Date.now()-31*86400000)}}).lean();const b=predictBaseline(orders,p);if(b.daysRemaining!==null&&b.daysRemaining<=b.leadTimeDays){try{await telegramSend(u.telegramChatId,`⚠️ ${p.sku}: ${p.stock} units; ~${b.daysRemaining} days remaining (lead time ${b.leadTimeDays} days). Reorder soon.`);p.lastAlertAt=new Date();await p.save();}catch(e){console.error('Telegram alert:',e.message);}}}}}
 app.use('/api', (req,res)=>res.status(404).json({error:'API route not found',path:req.originalUrl}));
-app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Server request failed'});});
+app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:process.env.NODE_ENV==='production'?'Server request failed':err.message||'Server request failed'});});
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 if(process.env.NODE_ENV==='production'){app.use(express.static(path.join(root,'dist')));app.get('*',(_,res)=>res.sendFile(path.join(root,'dist','index.html')));}
 if(!process.env.MONGODB_URI||!process.env.JWT_SECRET||process.env.JWT_SECRET.length<32)throw new Error('Set MONGODB_URI and strong JWT_SECRET in .env');
 await mongoose.connect(process.env.MONGODB_URI,{serverSelectionTimeoutMS:10000});
-app.listen(Number(process.env.PORT||3001),()=>console.log(`Marginly API :${process.env.PORT||3001}`));
+const server=app.listen(Number(process.env.PORT||3001),()=>console.log(`Marginly API :${process.env.PORT||3001}`));
+let shuttingDown=false;
+async function shutdown(){if(shuttingDown)return;shuttingDown=true;try{await releaseTelegramLease();}catch(e){console.error('Could not release Telegram polling lease:',e.message);}server.close();process.exit(0);}
+process.once('SIGINT',()=>void shutdown());
+process.once('SIGTERM',()=>void shutdown());
 void telegramPollingLoop();
-if(process.env.ALERT_JOB_ENABLED!=='false'){setInterval(()=>alertCycle().catch(console.error),15*60000).unref();alertCycle().catch(console.error);}
+if(process.env.ALERT_JOB_ENABLED!=='false'){setInterval(()=>{if(telegramPollingActive)alertCycle().catch(console.error);},15*60000).unref();}

@@ -12,3 +12,8 @@ AIRecommendation.schema.index({ owner: 1, day: 1, kind: 1 }, { unique: true });
 export const ReturnLog = model('ReturnLog', new Schema({ owner: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true }, orderId: { type: Schema.Types.ObjectId, ref: 'Order' }, productId: { type: Schema.Types.ObjectId, ref: 'Product' }, productName: String, marketplace: String, amount: Number, reason: String, date: Date, status: String }, common));
 export const Connection = model('Connection', new Schema({ owner: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true }, marketplace: { type: String, required: true }, encryptedToken: { type: String, required: true, select: false }, status: { type: String, default: 'Saved; not synced' }, lastSync: Date }, common));
 Connection.schema.index({ owner: 1, marketplace: 1 }, { unique: true });
+export const TelegramPollerLease = model('TelegramPollerLease', new Schema({
+  key: { type: String, unique: true, required: true },
+  owner: { type: String, required: true },
+  expiresAt: { type: Date, required: true },
+}));
