@@ -65,8 +65,12 @@ import {
 import "./styles.css";
 
 const originalFetch = window.fetch.bind(window);
-const apiFetch = (url, options = {}) =>
-  originalFetch(url, {
+const apiBaseUrl = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+const apiFetch = (url, options = {}) => {
+  const requestUrl = /^https?:\/\//i.test(url)
+    ? url
+    : `${apiBaseUrl}${url.startsWith("/") ? "" : "/"}${url}`;
+  return originalFetch(requestUrl, {
     ...options,
     headers: {
       ...(options.headers || {}),
@@ -77,6 +81,7 @@ const apiFetch = (url, options = {}) =>
         : {}),
     },
   });
+};
 const words = {
   en: {
     overview: "Overview",
@@ -234,7 +239,7 @@ function Root() {
       setChecking(false);
       return;
     }
-    originalFetch("/api/auth/me", {
+    apiFetch("/api/auth/me", {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => {

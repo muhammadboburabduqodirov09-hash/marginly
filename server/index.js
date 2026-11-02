@@ -5,6 +5,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { randomBytes, randomUUID } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
+import cors from 'cors';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -13,6 +14,8 @@ import { aggregate, predictBaseline, deepseek, seal, sha256, accountSchema } fro
 
 const app = express();
 app.disable('x-powered-by');
+const corsOrigins=[process.env.APP_BASE_URL,...(process.env.CORS_ORIGINS||'').split(','),'http://localhost:5173','http://127.0.0.1:5173'].filter(Boolean).map(origin=>new URL(origin.trim()).origin);
+app.use(cors({origin:(origin,callback)=>callback(null,!origin||corsOrigins.includes(origin))}));
 app.use(express.json({limit:'100kb'}));
 const wrap = fn => (req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
 const safeUser=u=>({id:String(u._id),email:u.email,name:u.name,locale:u.locale,demo:u.demo,businessName:u.businessName,currency:u.currency,widgetMuted:u.widgetMuted,telegramLinked:Boolean(u.telegramChatId)});

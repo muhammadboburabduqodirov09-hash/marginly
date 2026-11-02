@@ -11,6 +11,8 @@ cp .env.example .env             # Windows PowerShell: Copy-Item .env.example .e
 
 Set `MONGODB_URI`, `JWT_SECRET` (32+ random characters), `CREDENTIAL_ENCRYPTION_KEY` (32 random bytes encoded as 64 lowercase hex characters), and `DEMO_PASSWORD` (10+ characters) in `.env`. Set DeepSeek and Telegram keys only when enabling those integrations. **Do not commit `.env` or paste provider secrets into the frontend.**
 
+Set `VITE_API_URL=https://marginly-19ab.onrender.com` to send frontend API requests to the deployed Express API (this also applies during local Vite development). The Express server allows local Vite origins by default. When deploying a separate frontend, set `CORS_ORIGINS` on Render to its exact origin, such as `https://your-frontend.example`; multiple origins can be comma-separated.
+
 ```bash
 npm run seed
 npm run dev
